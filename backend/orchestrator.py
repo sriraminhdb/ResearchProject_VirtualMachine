@@ -9,10 +9,8 @@ class VMState:
 
 def run(binary_path: str):
     isa = detect_isa(binary_path)
-    # TODO: load the binary file into a bytearray
     state = VMState(memory=b"")
-    # TODO: implement fetch-decode-execute loop
     while True:
-        instr_bytes = b""  # placeholder for fetched bytes
+        instr_bytes = b""  # TODO: fetch bytes at state.pc
         state = dispatch(instr_bytes, state, isa)
-        break  # remove once loop is implemented
+        break

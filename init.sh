@@ -33,7 +33,3 @@ __pycache__/
 *.so
 EOF
 
-# 5. Commit
-git add .
-git commit -m "chore: initial project bootstrap"
-echo "✅ Done. Virtualenv active; PYTHONPATH set to project root."
