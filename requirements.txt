@@ -1,0 +1,5 @@
+capstone
+unicorn
+llvmlite
+pyelftools
+pytest
