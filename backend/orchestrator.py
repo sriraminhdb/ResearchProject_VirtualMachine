@@ -1,43 +1,33 @@
-from backend.isadetect import detect_isa
-from backend.dispatcher import dispatch
+from dataclasses import dataclass
 
+STACK_SIZE = 4096  # simple stack appended after code
+
+@dataclass
 class VMState:
-    def __init__(self, memory: bytes, registers=None, pc: int = 0):
-        # Use mutable memory buffer
+    memory: bytearray
+    registers: dict
+    pc: int
+    flags: dict
+    code_end: int  # end of original code (before stack padding)
+
+    def __init__(self, memory: bytes, registers=None, pc=0):
+        # keep original code, remember its end, then append stack
         self.memory = bytearray(memory)
-        self.registers = registers or {}
+        self.code_end = len(self.memory)
+        self.memory.extend(b"\x00" * STACK_SIZE)
+
+        self.registers = dict(registers or {})
+        top = len(self.memory)  # stack grows down from top
+        self.registers.setdefault("rsp", top)  # x86-64
+        self.registers.setdefault("sp",  top)  # AArch64
+
         self.pc = pc
-        # Flags for conditional logic
-        self.flags = {'ZF': False}
+        self.flags = {"ZF": False}
 
 def run_bytes(memory: bytes, isa: str) -> VMState:
-    """
-    Execute instructions in `memory` for the given ISA,
-    returning the final VMState.
-    """
-    state = VMState(memory=memory)
-    # Keep executing until PC walks off the end of the real memory buffer
-    while state.pc < len(state.memory):
-        # Always pass the full memory; each backend will decode at state.pc
+    from backend.dispatcher import dispatch
+    state = VMState(memory=memory, pc=0)
+    # Execute only within original code (don’t run into the zero-padded stack)
+    while 0 <= state.pc < state.code_end:
         state = dispatch(state.memory, state, isa)
     return state
-
-def run(binary_path: str) -> VMState:
-    """
-    Detect ISA for the given ELF file at `binary_path`,
-    load its bytes, and execute to completion.
-    """
-    isa = detect_isa(binary_path)
-    with open(binary_path, 'rb') as f:
-        mem = f.read()
-    return run_bytes(mem, isa)
-
-def dispatch(instr_bytes: bytes, state, isa: str):
-    if isa == "x86":
-        from backend.backends.x86 import step as x86_step
-        return x86_step(instr_bytes, state)
-    elif isa == "arm":
-        from backend.backends.arm import step as arm_step
-        return arm_step(instr_bytes, state)
-    else:
-        raise ValueError(f"Unsupported ISA: {isa}")
