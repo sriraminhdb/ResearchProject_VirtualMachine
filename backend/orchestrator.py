@@ -22,12 +22,13 @@ class VMState:
         self.registers.setdefault("sp",  top)  # AArch64
 
         self.pc = pc
-        self.flags = {"ZF": False}
+        # flags: ZF for conditions; _depth for call depth; _halt to stop run loop
+        self.flags = {"ZF": False, "_depth": 0, "_halt": False}
 
 def run_bytes(memory: bytes, isa: str) -> VMState:
     from backend.dispatcher import dispatch
     state = VMState(memory=memory, pc=0)
-    # Execute only within original code (don’t run into the zero-padded stack)
-    while 0 <= state.pc < state.code_end:
+    # Execute only within original code and while not halted
+    while (0 <= state.pc < state.code_end) and (not state.flags.get("_halt", False)):
         state = dispatch(state.memory, state, isa)
     return state
