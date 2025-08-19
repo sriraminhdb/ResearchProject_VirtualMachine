@@ -32,6 +32,7 @@ def run_bytes(
     breakpoints: Optional[Set[int]] = None,
     trace: Optional[Callable[[str, dict], None]] = None,
     use_ir: bool = False,
+    use_jit: bool = False,
     registers: Optional[Dict[str, int]] = None,
 ) -> VMState:
     """
@@ -67,7 +68,7 @@ def run_bytes(
             break
 
         pc_before = state.pc
-        state = dispatch(state.memory, state, isa, use_ir=use_ir, hooks=hooks, _detect_cache=detect_cache)
+        state = dispatch(state.memory, state, isa, use_ir=use_ir, use_jit=use_jit, hooks=hooks, _detect_cache=detect_cache)
         steps += 1
         state.flags["_steps"] = steps
 

@@ -48,6 +48,7 @@ def main():
     p.add_argument("--trace", action="store_true", help="Emit trace events.")
     p.add_argument("--json", action="store_true", help="Print JSON of final state + trace.")
     p.add_argument("--use-ir", action="store_true", help="Run through the common IR when available.")
+    p.add_argument("--use-jit", action="store_true", help="Execute via LLVM/llvmlite JIT when possible")
     args = p.parse_args()
 
     if args.hex is not None:
@@ -81,7 +82,8 @@ def main():
         max_steps=args.max_steps,
         breakpoints=bps,
         trace=trace_cb,
-        use_ir=args.use_ir,
+        use_ir=args.use_ir or args.use_jit,
+        use_jit=args.use_jit,
     )
 
     if args.json:

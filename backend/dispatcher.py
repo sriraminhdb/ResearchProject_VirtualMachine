@@ -9,6 +9,8 @@ from backend.core.ir import exec_ir, IROp
 from backend.decoders.arm_to_ir import decode_to_ir as arm_to_ir
 from backend.decoders.x86_to_ir import decode_to_ir as x86_to_ir  
 
+from backend.jit.llvmlite_jit import can_jit as jit_can, run_or_compile as jit_run
+
 def _decode_ir(mem: bytes, pc: int, isa: str) -> Tuple[List[IROp], int]:
     if isa == "arm":
         return arm_to_ir(mem, pc)
@@ -22,6 +24,7 @@ def dispatch(
     isa: str,
     *,
     use_ir: bool = False,
+    use_jit: bool = False,
     hooks: Optional[Dict[str, Any]] = None,
     _detect_cache: Optional[Dict[int, str]] = None,
 ):
@@ -38,6 +41,29 @@ def dispatch(
     """
     hooks = hooks or {}
     chosen = isa
+
+    if use_ir or use_jit:
+        ir_ops, size = _decode_ir(instr_bytes, state.pc, chosen)
+
+        if "after_decode" in hooks:
+            try:
+                hooks["after_decode"](chosen, state.pc, [type(op).__name__ for op in ir_ops])
+            except Exception:
+                pass
+
+        if ir_ops:
+            if use_jit and jit_can(ir_ops):
+                # JIT per-instruction IR
+                jit_run(state, ir_ops, chosen)
+            else:
+                exec_ir(state, ir_ops)
+
+            if "after_exec" in hooks:
+                try:
+                    hooks["after_exec"]({"isa": chosen}, state)
+                except Exception:
+                    pass
+            return state
 
     if isa == "auto":
         pc = state.pc
