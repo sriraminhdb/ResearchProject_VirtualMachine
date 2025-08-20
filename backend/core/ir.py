@@ -2,8 +2,6 @@ from __future__ import annotations
 from typing import List, Optional
 from struct import pack, unpack_from
 
-from backend.backends.x86 import _ensure
-
 class IROp:
     """Base IR op. `size` is the source-instruction byte length."""
     def __init__(self, size: int) -> None:
@@ -83,6 +81,13 @@ class STORE(IROp):
         self.src = src
         self.base = base
         self.disp = disp
+
+class AND(IROp):
+    def __init__(self, *, size:int, dst:str, a:str,
+                 b_reg:Optional[str]=None, b_imm:Optional[int]=None,
+                 set_flags: bool = False) -> None:
+        super().__init__(size)
+        self.dst, self.a, self.b_reg, self.b_imm, self.set_flags = dst, a, b_reg, b_imm, set_flags
 
 def _u64(x: int) -> int:
     return x & ((1 << 64) - 1)
@@ -183,11 +188,19 @@ def exec_ir(state, ops: List[IROp]) -> None:
             _write64(state, addr, state.registers.get(op.src, 0))
             state.pc += op.size
 
+        elif isinstance(op, AND):
+            b = getr(op.b_reg) if op.b_reg is not None else int(op.b_imm or 0)
+            res = getr(op.a) & b
+            setr(op.dst, res)
+            if op.set_flags:
+                state.flags["ZF"] = (_u64(res) == 0)
+            state.pc += op.size
+
         else:
             state.pc += getattr(op, "size", 1)
 
 
 __all__ = [
     "IROp", "exec_ir",
-    "NOP", "MOV", "ADD", "SUB", "CMP", "JE", "JMP", "CBZ", "LOAD", "STORE",
+    "NOP", "MOV", "ADD", "SUB", "CMP", "JE", "JMP", "CBZ", "LOAD", "STORE", "AND",
 ]

@@ -1,5 +1,37 @@
 import pytest
 from backend.orchestrator import run_bytes
+from backend.orchestrator import VMState
+from backend.core.ir import MOV, AND, CMP, exec_ir
+
+def test_ir_ands_sets_zf_zero():
+    """
+    x0=0xF0, x1=0x0F → ANDS x2,x0,x1 → x2=0, ZF=1
+    (exercise: IR semantics directly)
+    """
+    st = VMState(memory=b"", registers={}, pc=0)
+    ops = [
+        MOV(size=4, dst="x0", src_imm=0xF0),
+        MOV(size=4, dst="x1", src_imm=0x0F),
+        AND(size=4, dst="x2", a="x0", b_reg="x1", set_flags=True),  
+    ]
+    exec_ir(st, ops)
+    assert st.registers.get("x2") == 0
+    assert st.flags.get("ZF") is True
+
+def test_ir_and_no_flags_preserves_zf():
+    """
+    Make ZF=1 via CMP, then AND (no flags) must not touch ZF.
+    """
+    st = VMState(memory=b"", registers={}, pc=0)
+    ops = [
+        MOV(size=4, dst="x0", src_imm=0),
+        CMP(size=4, a_reg="x0", b_imm=0),                     
+        MOV(size=4, dst="x1", src_imm=3),
+        AND(size=4, dst="x2", a="x1", b_imm=1, set_flags=False),  
+    ]
+    exec_ir(st, ops)
+    assert st.registers.get("x2") == 1
+    assert st.flags.get("ZF") is True 
 
 def test_ir_arm_movz_basic():
     code = bytes.fromhex("41 00 80 D2")

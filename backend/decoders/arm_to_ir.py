@@ -3,7 +3,7 @@ from typing import List, Tuple
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
 from capstone.arm64 import ARM64_OP_REG, ARM64_OP_IMM, ARM64_OP_MEM
 
-from backend.core.ir import IROp, NOP, MOV, ADD, SUB, CMP, JE, JMP, CBZ, LOAD, STORE
+from backend.core.ir import IROp, NOP, MOV, ADD, SUB, CMP, JE, JMP, CBZ, LOAD, STORE, AND
 
 _md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
 _md.detail = True
@@ -114,6 +114,18 @@ def decode_to_ir(code: bytes, pc: int) -> Tuple[List[IROp], int]:
         disp = int(ops[1].mem.disp)
         src  = _reg_name(ops[0], insn)
         ir.append(STORE(size=size, src=src, base=base, disp=disp))
+        return ir, size
+
+    if mnem in ("and", "ands") and len(ops) >= 3 and ops[0].type == ARM64_OP_REG and ops[1].type == ARM64_OP_REG:
+        dst  = _reg_name(ops[0], insn)
+        a    = _reg_name(ops[1], insn)
+        setf = (mnem == "ands")
+        if ops[2].type == ARM64_OP_IMM:
+            ir.append(AND(size=size, dst=dst, a=a, b_imm=_imm_val(ops[2]), set_flags=setf))
+        elif ops[2].type == ARM64_OP_REG:
+            ir.append(AND(size=size, dst=dst, a=a, b_reg=_reg_name(ops[2], insn), set_flags=setf))
+        else:
+            ir.append(AND(size=size, dst=dst, a=a, b_imm=0, set_flags=setf))
         return ir, size
 
     return [], size

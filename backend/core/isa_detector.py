@@ -1,69 +1,31 @@
 from __future__ import annotations
+from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
 
-from typing import Optional
+_md_x86 = Cs(CS_ARCH_X86, CS_MODE_64); _md_x86.detail = False
+_md_a64 = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN); _md_a64.detail = False
 
-from capstone import Cs, CS_ARCH_X86, CS_MODE_64, CS_ARCH_ARM64
-
-_x86 = Cs(CS_ARCH_X86, CS_MODE_64)
-_x86.detail = False
-
-_arm = Cs(CS_ARCH_ARM64, 0)
-_arm.detail = False
-
-_COMMON_ARM = {
-    "mov", "movz", "add", "sub", "subs", "cmp", "b", "bl", "cbz", "ret", "nop", "ldr", "str"
-}
-
-def _try_x86(code: bytes, pc: int):
+def _can_decode(md, buf, pc, span):
     try:
-        it = _x86.disasm(code[pc:pc+15], pc)
-        insn = next(it, None)
-        if insn is None:
-            return None
-        if 1 <= insn.size <= 15:
-            return insn
-    except Exception:
-        pass
-    return None
+        _ = next(md.disasm(buf[pc:pc+span], pc))
+        return True
+    except StopIteration:
+        return False
 
-def _try_arm(code: bytes, pc: int):
-    try:
-        it = _arm.disasm(code[pc:pc+4], pc)
-        insn = next(it, None)
-        if insn is None:
-            return None
-        if insn.size == 4:
-            return insn
-    except Exception:
-        pass
-    return None
+def detect(buf: bytes, pc: int, hint: str | None = None) -> str:
+    arm_nop = (pc + 4 <= len(buf)) and (buf[pc:pc+4] == b"\x1F\x20\x03\xD5")
 
-def detect(mem: bytes, pc: int, *, hint: str | None = None) -> str:
-    """
-    Super-lightweight heuristic:
-      - Prefer strong AArch64 patterns (NOP, MOVZ, B/BL, CBZ/CBNZ)
-      - Otherwise accept common x86 bytes (CALL/JMP/Jcc/NOP)
-      - Fall back to hint or x86
-    """
-    b = mem[pc:pc+16]
-    if len(b) >= 4:
-        w = int.from_bytes(b[:4], "little")
+    ok_x86 = _can_decode(_md_x86, buf, pc, 15)
+    ok_a64 = (pc + 4 <= len(buf)) and _can_decode(_md_a64, buf, pc, 4)
 
-        if w == 0xD503201F:
-            return "arm"
+    if arm_nop:
+        return "arm"
 
-        if (w & 0xFFC00000) == 0xD2800000:
-            return "arm"
-
-        if (w & 0x7C000000) == 0x14000000 or (w & 0xFC000000) == 0x94000000:
-            return "arm"
-
-        if (w & 0x7F000000) == 0x34000000:
-            return "arm"
-
-    if b[:1] in (b"\xE8", b"\xE9", b"\xEB", b"\x90"):
+    if ok_x86 and not ok_a64:
         return "x86"
-    if len(b) >= 2 and b[0] in (0x0F,) and b[1] in range(0x80, 0x90): 
-        return "x86"
+    if ok_a64 and not ok_x86:
+        return "arm"
 
-    return hint or "x86"
+    if ok_x86 and ok_a64:
+        return "arm" if (pc % 4) == 0 else "x86"
+
+    return hint if hint in ("x86", "arm") else "x86"

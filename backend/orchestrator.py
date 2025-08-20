@@ -23,6 +23,9 @@ class VMState:
         self.pc = pc
         self.flags = {"ZF": False, "_depth": 0, "_halt": False}
 
+        top = len(self.memory)
+        self.registers.setdefault("rsp", top)
+        self.registers.setdefault("sp", top)
 
 def run_bytes(
     memory: bytes,
@@ -46,6 +49,8 @@ def run_bytes(
     state = VMState(memory=bytearray(memory), registers=registers or {}, pc=0)
     steps = 0
     same_pc_count = 0
+    _top = len(state.memory)
+    _stack_touched = False
 
     hooks: Dict[str, Any] = {}
     if trace:
@@ -72,6 +77,10 @@ def run_bytes(
         steps += 1
         state.flags["_steps"] = steps
 
+        if (state.registers.get("rsp", _top) != _top) or \
+           (state.registers.get("sp", _top)  != _top):
+            _stack_touched = True
+
         if steps >= max_steps:
             state.flags["_halt"] = True
             break
@@ -84,8 +93,10 @@ def run_bytes(
         else:
             same_pc_count = 0
 
-    if state.registers.get("rsp") == initial_rsp and state.registers.get("sp") == initial_sp:
-        del state.registers["rsp"]
-        del state.registers["sp"]
+    if (not _stack_touched and
+        state.registers.get("rsp") == _top and
+        state.registers.get("sp")  == _top):
+        state.registers.pop("rsp", None)
+        state.registers.pop("sp", None)
 
     return state

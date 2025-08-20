@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-import argparse
-import json
-import sys
+import argparse, json, sys
 from typing import Optional, Set, Callable, Dict, Any
 
 from backend.orchestrator import run_bytes
+from backend.decoders.arm_to_ir import decode_to_ir as arm_to_ir
+from backend.decoders.x86_to_ir import decode_to_ir as x86_to_ir
+from backend.tcg_dump import render_tcg
 
 def _read_file(path: str, *, hexfile: bool) -> bytes:
     data = open(path, "rb").read()
@@ -49,6 +50,8 @@ def main():
     p.add_argument("--json", action="store_true", help="Print JSON of final state + trace.")
     p.add_argument("--use-ir", action="store_true", help="Run through the common IR when available.")
     p.add_argument("--use-jit", action="store_true", help="Execute via LLVM/llvmlite JIT when possible")
+    p.add_argument("--emit-tcg", action="store_true", help="Emit TCG representation.")
+    p.add_argument("--via-qemu-user", action="store_true", help="Execute the given bytes via qemu-user (TCG) and round-trip core regs.")
     args = p.parse_args()
 
     if args.hex is not None:
@@ -108,6 +111,40 @@ def main():
             print("\nTrace:")
             for e in trace_log:
                 print(e)
+
+    if args.emit_tcg:
+        pc = 0
+        lines = []
+        while pc < len(data):
+            if args.isa == "arm":
+                ir_ops, sz = arm_to_ir(data, pc)
+            elif args.isa == "x86":
+                ir_ops, sz = x86_to_ir(data, pc)
+            else:
+                ir_ops, sz = x86_to_ir(data, pc)
+                if not ir_ops or sz == 0:
+                    ir_ops, sz = arm_to_ir(data, pc)
+            if sz <= 0:
+                break
+            lines += [f"\n# insn @0x{pc:x}, size={sz}"]
+            lines += render_tcg(ir_ops, pc=pc)
+            pc += sz
+        print("\n".join(lines))
+        return
+
+    if args.via_qemu_user:
+        from backend.executors.qemu_user import run_x86_under_qemu
+        if args.isa != "x86":
+            raise SystemExit("--via-qemu-user: x86 only in this first cut")
+        final_regs = run_x86_under_qemu(data, {})
+        result = {
+            "isa": "x86",
+            "pc": len(data),
+            "registers": final_regs,
+            "flags": {}
+        }
+        print(json.dumps(result, indent=2))
+        return
 
 if __name__ == "__main__":
     main()
