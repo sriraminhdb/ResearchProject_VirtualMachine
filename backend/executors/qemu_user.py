@@ -37,11 +37,14 @@ def run_arm64_under_qemu(code: bytes, init: Optional[Dict[str,int]] = None) -> D
     if not os.path.exists(helper):
         raise HelperNotFound(helper)
 
-    env = os.environ.copy()
+    env = dict(os.environ)
+    if "QEMU_LD_PREFIX" not in env and os.path.isdir("/usr/aarch64-linux-gnu"):
+        env["QEMU_LD_PREFIX"] = "/usr/aarch64-linux-gnu"
+
     if init and "x1" in init:
         env["INIT_X1"] = str(init["x1"])
 
     proc = subprocess.run([qemu, helper], input=code, env=env,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-    out = proc.stdout.decode("utf-8").strip()
+    out = proc.stdout.decode().strip()
     return json.loads(out)
