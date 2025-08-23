@@ -3,3 +3,4 @@ unicorn
 llvmlite
 pyelftools
 pytest
+psutil
