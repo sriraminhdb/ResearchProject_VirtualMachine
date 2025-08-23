@@ -2,6 +2,8 @@ from __future__ import annotations
 from typing import List, Optional
 from struct import pack, unpack_from
 
+from backend.backends.x86 import _ensure
+
 class IROp:
     """Base IR op. `size` is the source-instruction byte length."""
     def __init__(self, size: int) -> None:
@@ -23,24 +25,58 @@ class ADD(IROp):
     def __init__(self, *, size: int, dst: str, a: str,
                  b_reg: Optional[str] = None,
                  b_imm: Optional[int] = None,
+                 b_shift: int = 0,
                  set_flags: bool = False) -> None:
         super().__init__(size)
         self.dst = dst
         self.a = a
         self.b_reg = b_reg
         self.b_imm = b_imm
+        self.b_shift = b_shift
         self.set_flags = set_flags
 
 class SUB(IROp):
     def __init__(self, *, size: int, dst: str, a: str,
                  b_reg: Optional[str] = None,
                  b_imm: Optional[int] = None,
+                 b_shift: int = 0,
                  set_flags: bool = False) -> None:
         super().__init__(size)
         self.dst = dst
         self.a = a
         self.b_reg = b_reg
         self.b_imm = b_imm
+        self.b_shift = b_shift
+        self.set_flags = set_flags
+
+class AND(IROp):
+    def __init__(self, *, size:int, dst:str, a:str,
+                 b_reg:Optional[str]=None, b_imm:Optional[int]=None,
+                 b_shift:int = 0,
+                 set_flags: bool = False) -> None:
+        super().__init__(size)
+        self.dst, self.a = dst, a
+        self.b_reg, self.b_imm, self.b_shift = b_reg, b_imm, b_shift
+        self.set_flags = set_flags
+
+class OR(IROp):
+    def __init__(self, *, size:int, dst:str, a:str,
+                 b_reg:Optional[str]=None, b_imm:Optional[int]=None,
+                 b_shift:int = 0,
+                 set_flags: bool = False) -> None:
+        super().__init__(size)
+        self.dst, self.a = dst, a
+        self.b_reg, self.b_imm, self.b_shift = b_reg, b_imm, b_shift
+        self.set_flags = set_flags
+
+class XOR(IROp):
+    def __init__(self, *, size:int, dst:str, a:str,
+                 b_reg:Optional[str]=None, b_imm:Optional[int]=None,
+                 b_shift:int = 0,
+                 set_flags: bool = False) -> None:
+        super().__init__(size)
+        self.dst, self.a = dst, a
+        self.b_reg, self.b_imm, self.b_shift = b_reg, b_imm, b_shift
         self.set_flags = set_flags
 
 class CMP(IROp):
@@ -82,12 +118,10 @@ class STORE(IROp):
         self.base = base
         self.disp = disp
 
-class AND(IROp):
-    def __init__(self, *, size:int, dst:str, a:str,
-                 b_reg:Optional[str]=None, b_imm:Optional[int]=None,
-                 set_flags: bool = False) -> None:
+class MOVK(IROp):
+    def __init__(self, *, size:int, dst:str, imm16:int, shift:int) -> None:
         super().__init__(size)
-        self.dst, self.a, self.b_reg, self.b_imm, self.set_flags = dst, a, b_reg, b_imm, set_flags
+        self.dst, self.imm16, self.shift = dst, imm16 & 0xFFFF, shift
 
 def _u64(x: int) -> int:
     return x & ((1 << 64) - 1)
@@ -96,7 +130,7 @@ def exec_ir(state, ops: List[IROp]) -> None:
     """
     Execute a small list of IR ops against the given VMState in-place.
     """
-    mem = state.memory  
+    mem = state.memory  # bytearray
 
     def getr(r: str) -> int:
         return int(state.registers.get(r, 0))
@@ -117,10 +151,6 @@ def exec_ir(state, ops: List[IROp]) -> None:
     def write_q(addr: int, v: int) -> None:
         ensure_mem(addr + 8)
         mem[addr:addr+8] = int(_u64(v)).to_bytes(8, "little", signed=False)
-
-    def _ensure(mem: bytearray, length: int):
-        if length > len(mem):
-            mem.extend(b"\x00" * (length - len(mem)))
 
     def _read64(state, addr):
         _ensure(state.memory, addr + 8)
@@ -143,6 +173,8 @@ def exec_ir(state, ops: List[IROp]) -> None:
 
         elif isinstance(op, ADD):
             b = getr(op.b_reg) if op.b_reg is not None else int(op.b_imm or 0)
+            if op.b_reg is not None and op.b_shift:
+                b = _u64(b) << op.b_shift
             res = getr(op.a) + b
             setr(op.dst, res)
             if op.set_flags:
@@ -151,7 +183,39 @@ def exec_ir(state, ops: List[IROp]) -> None:
 
         elif isinstance(op, SUB):
             b = getr(op.b_reg) if op.b_reg is not None else int(op.b_imm or 0)
+            if op.b_reg is not None and op.b_shift:
+                b = _u64(b) << op.b_shift
             res = getr(op.a) - b
+            setr(op.dst, res)
+            if op.set_flags:
+                state.flags["ZF"] = (_u64(res) == 0)
+            state.pc += op.size
+
+        elif isinstance(op, AND):
+            b = getr(op.b_reg) if op.b_reg is not None else int(op.b_imm or 0)
+            if op.b_reg is not None and op.b_shift:
+                b = _u64(b) << op.b_shift
+            res = getr(op.a) & b
+            setr(op.dst, res)
+            if op.set_flags:
+                state.flags["ZF"] = (_u64(res) == 0)
+            state.pc += op.size
+
+        elif isinstance(op, OR):
+            b = getr(op.b_reg) if op.b_reg is not None else int(op.b_imm or 0)
+            if op.b_reg is not None and op.b_shift:
+                b = _u64(b) << op.b_shift
+            res = getr(op.a) | b
+            setr(op.dst, res)
+            if op.set_flags:
+                state.flags["ZF"] = (_u64(res) == 0)
+            state.pc += op.size
+
+        elif isinstance(op, XOR):
+            b = getr(op.b_reg) if op.b_reg is not None else int(op.b_imm or 0)
+            if op.b_reg is not None and op.b_shift:
+                b = _u64(b) << op.b_shift
+            res = getr(op.a) ^ b
             setr(op.dst, res)
             if op.set_flags:
                 state.flags["ZF"] = (_u64(res) == 0)
@@ -181,19 +245,18 @@ def exec_ir(state, ops: List[IROp]) -> None:
         elif isinstance(op, LOAD):
             addr = (state.registers.get(op.base, 0) + op.disp) & ((1<<64)-1)
             state.registers[op.dst] = _read64(state, addr)
-            state.pc += op.size  
+            state.pc += op.size
 
         elif isinstance(op, STORE):
             addr = (state.registers.get(op.base, 0) + op.disp) & ((1<<64)-1)
             _write64(state, addr, state.registers.get(op.src, 0))
             state.pc += op.size
 
-        elif isinstance(op, AND):
-            b = getr(op.b_reg) if op.b_reg is not None else int(op.b_imm or 0)
-            res = getr(op.a) & b
-            setr(op.dst, res)
-            if op.set_flags:
-                state.flags["ZF"] = (_u64(res) == 0)
+        elif isinstance(op, MOVK):
+            old = getr(op.dst)
+            mask = ~(0xFFFF << op.shift) & ((1<<64)-1)
+            newv = (old & mask) | ((op.imm16 & 0xFFFF) << op.shift)
+            setr(op.dst, newv)
             state.pc += op.size
 
         else:
@@ -202,5 +265,6 @@ def exec_ir(state, ops: List[IROp]) -> None:
 
 __all__ = [
     "IROp", "exec_ir",
-    "NOP", "MOV", "ADD", "SUB", "CMP", "JE", "JMP", "CBZ", "LOAD", "STORE", "AND",
+    "NOP", "MOV", "ADD", "SUB", "CMP", "JE", "JMP", "CBZ",
+    "LOAD", "STORE", "AND", "OR", "XOR", "MOVK",
 ]
