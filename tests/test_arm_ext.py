@@ -1,5 +1,3 @@
-# tests/test_arm_ext.py
-
 import pytest
 from backend.backends.arm import step as arm_step
 from backend.orchestrator import VMState, run_bytes

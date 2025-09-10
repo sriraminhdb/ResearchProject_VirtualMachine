@@ -1,0 +1,11 @@
+{
+  "pairs": 300,
+  "switches": 600,
+  "samples": 599,
+  "mean_us": 5137.18112687813,
+  "median_us": 4929.551,
+  "p95_us": 14100.697,
+  "switches_per_sec_mean": 194.65928401237838,
+  "switches_per_sec_median": 202.85823191605076,
+  "rss_bytes": 65949696
+}

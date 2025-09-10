@@ -1,0 +1,71 @@
+{
+  "meta": {
+    "platform": "linux",
+    "python": "3.12.3",
+    "runs_per_case": 30,
+    "repeats": 2000,
+    "rss_bytes_start": 16961536,
+    "rss_bytes_end": 147603456,
+    "rss_bytes_peak": 149508096
+  },
+  "x86_native": {
+    "runs": 30,
+    "instrs_per_run": 2000,
+    "mean_us": 2501831.841333333,
+    "median_us": 2470099.573,
+    "p95_us": 2888134.116,
+    "ips_mean": 799.4142399810991,
+    "ips_median": 809.6839584369258
+  },
+  "x86_ir": {
+    "runs": 30,
+    "instrs_per_run": 2000,
+    "mean_us": 5420.050366666666,
+    "median_us": 4804.5869999999995,
+    "p95_us": 8336.219,
+    "ips_mean": 369000.26101233467,
+    "ips_median": 416268.86972803285
+  },
+  "x86_jit": {
+    "runs": 30,
+    "instrs_per_run": 2000,
+    "mean_us": 10348.874000000002,
+    "median_us": 10189.643,
+    "p95_us": 11564.769,
+    "ips_mean": 193257.7399241695,
+    "ips_median": 196277.73024040196
+  },
+  "arm_native": {
+    "runs": 30,
+    "instrs_per_run": 2000,
+    "mean_us": 5334181.6196,
+    "median_us": 5386734.1205,
+    "p95_us": 5680808.673,
+    "ips_mean": 374.94036435714315,
+    "ips_median": 371.2824793762716
+  },
+  "arm_ir": {
+    "runs": 30,
+    "instrs_per_run": 2000,
+    "mean_us": 5844252.5772,
+    "median_us": 5517660.5715,
+    "p95_us": 7218219.636,
+    "ips_mean": 342.2165578199918,
+    "ips_median": 362.4724598556253
+  },
+  "arm_jit": {
+    "runs": 30,
+    "instrs_per_run": 2000,
+    "mean_us": 5680844.045133334,
+    "median_us": 5629124.963500001,
+    "p95_us": 6790698.826,
+    "ips_mean": 352.06036006451546,
+    "ips_median": 355.2950081883539
+  },
+  "speedup_vs_native": {
+    "x86_ir": 514.1127786842032,
+    "x86_jit": 242.412768828113,
+    "arm_ir": 0.9762713836229316,
+    "arm_jit": 0.9569398717257664
+  }
+}

@@ -1,119 +1,189 @@
+from __future__ import annotations
+from struct import pack, unpack_from
 from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
 from capstone.arm64 import ARM64_OP_REG, ARM64_OP_IMM, ARM64_OP_MEM
-from struct import unpack_from, pack
 
-# Initialize Capstone for AArch64, little-endian mode
 _md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
 _md.detail = True
 
+def _get(state, name: str) -> int:
+    return state.registers.get(name.lower(), 0)
+
+def _set(state, name: str, val: int):
+    state.registers[name.lower()] = val & ((1 << 64) - 1)
+
+def _ensure(mem, length: int):
+    if length < 0:
+        return
+    if length > len(mem):
+        mem.extend(b"\x00" * (length - len(mem)))
+
 def step(instr_bytes: bytes, state):
-    # If fewer than 4 bytes remain, advance past end so runner stops
-    if state.pc + 4 > len(instr_bytes):
-        state.pc += 4
-        return state
+    """
+    Execute one AArch64 instruction at state.pc.
 
-    # Decode next instruction (or skip 4 bytes on failure)
+    Supported (subset for project tests):
+      - Control flow: b imm, cbz reg, bl imm (link to x30), ret (uses x30), nop
+      - Moves/ALU: mov/movz, add, sub, subs, cmp (sets ZF)
+      - ldr/str [base + imm]
+    """
     code = instr_bytes[state.pc:]
-    try:
-        insn = next(_md.disasm(code, state.pc))
-    except StopIteration:
-        state.pc += 4
-        return state
+    insn = next(_md.disasm(code, state.pc))
+    m, ops = insn.mnemonic, insn.operands
 
-    m   = insn.mnemonic
-    ops = insn.operands
+    def rname(op_or_id):
+        if isinstance(op_or_id, int):
+            return insn.reg_name(op_or_id)
+        return insn.reg_name(op_or_id.reg)
 
-    ### B (unconditional, PC-relative) ###
-    if m == "b" and len(ops) == 1 and ops[0].type == ARM64_OP_IMM:
-        # ops[0].imm is a byte offset relative to current PC
-        state.pc += ops[0].imm
-        return state
+    def read_mem(base_reg: str, disp: int) -> int:
+        addr = _get(state, base_reg) + disp
+        _ensure(state.memory, addr + 8)
+        return unpack_from("<Q", state.memory, addr)[0]
 
-    ### CBZ (PC-relative branch on zero) ###
-    if m == "cbz" and len(ops) == 2 and ops[0].type == ARM64_OP_REG:
-        reg  = insn.reg_name(ops[0].reg)
-        val  = state.registers.get(reg, 0)
-        if val == 0:
-            # ops[1].imm is a byte offset relative to current PC
-            state.pc += ops[1].imm
-            return state
+    def write_mem(base_reg: str, disp: int, val: int):
+        addr = _get(state, base_reg) + disp
+        _ensure(state.memory, addr + 8)
+        state.memory[addr:addr+8] = pack("<Q", val & ((1 << 64) - 1))
 
-    ### MOV / MOVZ / MOVK ###
-    if m in ("mov", "movz", "movk") and len(ops) == 2:
-        dest = insn.reg_name(ops[0].reg)
-        if ops[1].type == ARM64_OP_REG:
-            src = insn.reg_name(ops[1].reg)
-            state.registers[dest] = state.registers.get(src, 0)
-        else:
-            state.registers[dest] = ops[1].imm
-        state.flags['ZF'] = (state.registers[dest] == 0)
+    if m == "nop":
         state.pc += insn.size
         return state
 
-    ### ADD reg, reg/imm ###
+    if m in ("mov", "movz", "movn", "movk") and len(ops) == 2 and ops[0].type == ARM64_OP_REG:
+        if ops[1].type == ARM64_OP_IMM:
+            _set(state, rname(ops[0]), int(ops[1].imm))
+        elif ops[1].type == ARM64_OP_REG:
+            _set(state, rname(ops[0]), _get(state, rname(ops[1])))
+        state.pc += insn.size
+        return state
+
     if m == "add" and len(ops) == 3 and ops[0].type == ARM64_OP_REG:
-        dest = insn.reg_name(ops[0].reg)
-        left = state.registers.get(insn.reg_name(ops[1].reg), 0)
-        right = (
-            ops[2].imm
-            if ops[2].type == ARM64_OP_IMM
-            else state.registers.get(insn.reg_name(ops[2].reg), 0)
-        )
-        res = left + right
-        state.registers[dest] = res
-        state.flags['ZF'] = (res == 0)
+        a = _get(state, rname(ops[1]))
+        b = int(ops[2].imm) if ops[2].type == ARM64_OP_IMM else _get(state, rname(ops[2]))
+        _set(state, rname(ops[0]), (a + b) & ((1 << 64) - 1))
         state.pc += insn.size
         return state
 
-    ### SUB / SUBS reg, reg/imm ###
     if m in ("sub", "subs") and len(ops) == 3 and ops[0].type == ARM64_OP_REG:
-        dest = insn.reg_name(ops[0].reg)
-        left = state.registers.get(insn.reg_name(ops[1].reg), 0)
-        right = (
-            ops[2].imm
-            if ops[2].type == ARM64_OP_IMM
-            else state.registers.get(insn.reg_name(ops[2].reg), 0)
-        )
-        res = left - right
+        a = _get(state, rname(ops[1]))
+        b = int(ops[2].imm) if ops[2].type == ARM64_OP_IMM else _get(state, rname(ops[2]))
+        res = (a - b) & ((1 << 64) - 1)
+        _set(state, rname(ops[0]), res)
         if m == "subs":
-            state.registers[dest] = res
-        state.flags['ZF'] = (res == 0)
+            state.flags["ZF"] = (res == 0)
         state.pc += insn.size
         return state
 
-    ### LDR literal / LDR (immediate) ###
+    if m == "cmp" and len(ops) == 2 and ops[0].type == ARM64_OP_REG:
+        a = _get(state, rname(ops[0]))
+        b = int(ops[1].imm) if ops[1].type == ARM64_OP_IMM else _get(state, rname(ops[1]))
+        state.flags["ZF"] = ((a - b) & ((1 << 64) - 1)) == 0
+        state.pc += insn.size
+        return state
+
     if m == "ldr" and len(ops) == 2 and ops[1].type == ARM64_OP_MEM:
-        dest = insn.reg_name(ops[0].reg)
-        mem  = ops[1].mem
-        if mem.base == 0:
-            # PC-relative (literal pool)
-            addr = state.pc + mem.disp
-        else:
-            base = state.registers.get(insn.reg_name(mem.base), 0)
-            addr = base + mem.disp
-        if addr + 8 <= len(instr_bytes):
-            val = unpack_from("<Q", instr_bytes, addr)[0]
-        else:
-            val = 0
-        state.registers[dest] = val
-        state.flags['ZF'] = (val == 0)
+        mem = ops[1].mem
+        _set(state, rname(ops[0]), read_mem(rname(mem.base), mem.disp))
         state.pc += insn.size
         return state
 
-    ### STR reg, [base, #imm] ###
     if m == "str" and len(ops) == 2 and ops[1].type == ARM64_OP_MEM:
-        src  = insn.reg_name(ops[0].reg)
-        mem  = ops[1].mem
-        base = state.registers.get(insn.reg_name(mem.base), 0)
-        addr = base + mem.disp
-        data = pack("<Q", state.registers.get(src, 0))
-        end  = addr + len(data)
-        if end > len(state.memory):
-            state.memory.extend(b'\x00' * (end - len(state.memory)))
-        state.memory[addr:end] = data
+        mem = ops[1].mem
+        write_mem(rname(mem.base), mem.disp, _get(state, rname(ops[0])))
         state.pc += insn.size
         return state
 
-    # Default case: just advance PC
+    if m == "b" and len(ops) == 1 and ops[0].type == ARM64_OP_IMM:
+        state.pc = int(ops[0].imm)
+        return state
+
+    if m == "cbz" and len(ops) == 2 and ops[1].type == ARM64_OP_IMM:
+        reg_is_zero = (_get(state, rname(ops[0])) == 0)
+        if reg_is_zero:
+            state.pc = insn.address + int(ops[1].imm)
+        else:
+            state.pc += insn.size
+        return state
+
+    if m == "bl" and len(ops) == 1 and ops[0].type == ARM64_OP_IMM:
+        next_pc = insn.address + insn.size
+        _set(state, "x30", next_pc)
+        state.pc = int(ops[0].imm)
+        state.flags["_depth"] = int(state.flags.get("_depth", 0)) + 1
+        return state
+
+    if m == "ret":
+        lr = _get(state, "x30")
+        state.pc = lr
+        depth = int(state.flags.get("_depth", 0)) - 1
+        state.flags["_depth"] = max(depth, 0)
+        if state.flags["_depth"] == 0:
+            state.flags["_halt"] = True
+        return state
+
     state.pc += insn.size
     return state
+
+from backend.ir import (
+    IRNop, IRMovImm, IRMovReg, IRAdd, IRSub, IRLoad, IRStore,
+    IRCmp, IRJmp, IRJe
+)
+
+def decode_to_ir(instr_bytes: bytes, state):
+    code = instr_bytes[state.pc:]
+    insn = next(_md.disasm(code, state.pc))
+    m, ops = insn.mnemonic, insn.operands
+    size = insn.size
+    ir = []
+
+    def rname(op_or_id):
+        if isinstance(op_or_id, int):
+            return insn.reg_name(op_or_id)
+        return insn.reg_name(op_or_id.reg)
+
+    if m == "nop":
+        ir = [IRNop()]
+
+    elif m.startswith("mov") and len(ops) == 2 and ops[0].type == ARM64_OP_REG:
+        if ops[1].type == ARM64_OP_IMM:
+            ir = [IRMovImm(rname(ops[0]), int(ops[1].imm))]
+        elif ops[1].type == ARM64_OP_REG:
+            ir = [IRMovReg(rname(ops[0]), rname(ops[1]))]
+
+    elif m == "add" and len(ops) == 3 and ops[0].type == ARM64_OP_REG:
+        if ops[2].type == ARM64_OP_IMM:
+            ir = [IRAdd(rname(ops[0]), rname(ops[1]), int(ops[2].imm))]
+        else:
+            ir = [IRAdd(rname(ops[0]), rname(ops[1]), rname(ops[2]))]
+
+    elif m in ("sub", "subs") and len(ops) == 3 and ops[0].type == ARM64_OP_REG:
+        if ops[2].type == ARM64_OP_IMM:
+            ir = [IRSub(rname(ops[0]), rname(ops[1]), int(ops[2].imm))]
+        else:
+            ir = [IRSub(rname(ops[0]), rname(ops[1]), rname(ops[2]))]
+        if m == "subs":
+            ir.append(IRCmp(rname(ops[0]), 0))
+
+    elif m == "cmp" and len(ops) == 2 and ops[0].type == ARM64_OP_REG:
+        right = (int(ops[1].imm) if ops[1].type == ARM64_OP_IMM else rname(ops[1]))
+        ir = [IRCmp(rname(ops[0]), right)]
+
+    elif m == "ldr" and len(ops) == 2 and ops[1].type == ARM64_OP_MEM:
+        mem = ops[1].mem
+        ir = [IRLoad(rname(ops[0]), base=rname(mem.base), disp=mem.disp)]
+
+    elif m == "str" and len(ops) == 2 and ops[1].type == ARM64_OP_MEM:
+        mem = ops[1].mem
+        ir = [IRStore(rname(ops[0]), base=rname(mem.base), disp=mem.disp)]
+
+    elif m == "b" and len(ops) == 1 and ops[0].type == ARM64_OP_IMM:
+        ir = [IRJmp(int(ops[0].imm))]
+
+    elif m == "cbz" and len(ops) == 2 and ops[1].type == ARM64_OP_IMM:
+        ir = [IRCmp(rname(ops[0]), 0), IRJe(int(ops[1].imm))]
+
+    else:
+        ir = [IRNop()]
+
+    return ir, size
