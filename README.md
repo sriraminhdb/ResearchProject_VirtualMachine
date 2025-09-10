@@ -76,26 +76,7 @@ python -m backend.cli --isa x86 --hex "48C7C007000000" --emit-tcg
 2. **IR**: Common intermediate representation with optimization
 3. **JIT**: LLVM-based just-in-time compilation
 
-## Testing Framework
-
-Comprehensive test suite covering:
-
-```bash
-# Core functionality tests
-pytest tests/test_orchestrator.py -v
-
-# ISA backend tests
-pytest tests/test_x86_backend.py tests/test_arm_backend.py -v
-
-# Adaptive execution tests
-pytest tests/test_adaptive_execution.py -v
-
-# Multi-ISA switching tests  
-pytest tests/test_multi_isa_switch.py -v
-
-# Research question evaluation
-python evaluation/research_questions.py
-```
+---
 
 ## Project Structure
 
