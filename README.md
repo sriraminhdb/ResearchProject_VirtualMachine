@@ -13,7 +13,6 @@ This project implements an **adaptive virtual machine** capable of executing pro
 - **Register State Mapping**: Preserves program state across ISA boundaries with semantic register mapping
 - **Multiple Execution Modes**: Native interpretation, IR-based execution, and LLVM JIT compilation
 - **Comprehensive Tracing**: Detailed execution metrics and performance analysis
-- **Research-Grade Evaluation**: Systematic testing framework for correctness and performance
 
 ## Quick Start
 
@@ -34,9 +33,6 @@ chmod +x init.sh && ./init.sh
 
 # Activate virtual environment
 source venv/bin/activate
-
-# Run tests to verify installation
-pytest tests/ -v
 ```
 
 ### Basic Usage
