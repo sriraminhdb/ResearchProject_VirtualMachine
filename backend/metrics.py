@@ -1,5 +1,3 @@
-# backend/metrics.py
-
 import time
 import statistics
 from typing import Dict, List, Any, Optional

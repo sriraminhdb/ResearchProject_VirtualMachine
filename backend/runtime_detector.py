@@ -1,5 +1,3 @@
-# backend/runtime_detector.py (FIXED VERSION)
-
 def detect_isa_at_runtime(instr_bytes: bytes, pc: int) -> str:
     """
     Detect ISA based on instruction format at current PC.

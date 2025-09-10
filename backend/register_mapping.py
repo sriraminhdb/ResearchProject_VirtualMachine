@@ -1,5 +1,3 @@
-# backend/register_mapping.py
-
 from typing import Dict, Any, Optional, Set, Tuple, List
 import logging
 
