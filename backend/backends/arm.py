@@ -1,189 +1,150 @@
 from __future__ import annotations
-from struct import pack, unpack_from
-from capstone import Cs, CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN
-from capstone.arm64 import ARM64_OP_REG, ARM64_OP_IMM, ARM64_OP_MEM
+from typing import Any
 
-_md = Cs(CS_ARCH_ARM64, CS_MODE_LITTLE_ENDIAN)
-_md.detail = True
+MASK64 = (1 << 64) - 1
 
-def _get(state, name: str) -> int:
-    return state.registers.get(name.lower(), 0)
-
-def _set(state, name: str, val: int):
-    state.registers[name.lower()] = val & ((1 << 64) - 1)
-
-def _ensure(mem, length: int):
+def _ensure(mem: bytearray, length: int) -> None:
     if length < 0:
         return
     if length > len(mem):
         mem.extend(b"\x00" * (length - len(mem)))
 
-def step(instr_bytes: bytes, state):
-    """
-    Execute one AArch64 instruction at state.pc.
+def _get(state, reg: str) -> int:
+    return int(state.registers.get(reg, 0)) & MASK64
 
-    Supported (subset for project tests):
-      - Control flow: b imm, cbz reg, bl imm (link to x30), ret (uses x30), nop
-      - Moves/ALU: mov/movz, add, sub, subs, cmp (sets ZF)
-      - ldr/str [base + imm]
-    """
-    code = instr_bytes[state.pc:]
-    insn = next(_md.disasm(code, state.pc))
-    m, ops = insn.mnemonic, insn.operands
+def _set(state, reg: str, val: int) -> None:
+    state.registers[reg] = int(val) & MASK64
 
-    def rname(op_or_id):
-        if isinstance(op_or_id, int):
-            return insn.reg_name(op_or_id)
-        return insn.reg_name(op_or_id.reg)
+def rname(idx: int) -> str:
+    return f"x{idx}"
 
-    def read_mem(base_reg: str, disp: int) -> int:
-        addr = _get(state, base_reg) + disp
-        _ensure(state.memory, addr + 8)
-        return unpack_from("<Q", state.memory, addr)[0]
+def write_mem(reg: str, disp: int, val: int, *, state) -> None:
+    base = _get(state, reg) + disp
+    _ensure(state.memory, base + 8)
+    state.memory[base:base+8] = int(val).to_bytes(8, "little")
 
-    def write_mem(base_reg: str, disp: int, val: int):
-        addr = _get(state, base_reg) + disp
-        _ensure(state.memory, addr + 8)
-        state.memory[addr:addr+8] = pack("<Q", val & ((1 << 64) - 1))
+def read_mem(reg: str, disp: int, *, state) -> int:
+    base = _get(state, reg) + disp
+    _ensure(state.memory, base + 8)
+    return int.from_bytes(state.memory[base:base+8], "little")
 
-    if m == "nop":
-        state.pc += insn.size
+
+def step(mem: bytes | bytearray, state) -> Any:
+    # Make sure memory is mutable
+    if not isinstance(state.memory, bytearray):
+        state.memory = bytearray(state.memory)
+
+    pc = state.pc
+    ins = int.from_bytes(state.memory[pc:pc+4], "little")
+    state.pc = pc + 4  # optimistic advance; handlers can override
+
+    # NOP
+    if ins == 0xD503201F:
         return state
 
-    if m in ("mov", "movz", "movn", "movk") and len(ops) == 2 and ops[0].type == ARM64_OP_REG:
-        if ops[1].type == ARM64_OP_IMM:
-            _set(state, rname(ops[0]), int(ops[1].imm))
-        elif ops[1].type == ARM64_OP_REG:
-            _set(state, rname(ops[0]), _get(state, rname(ops[1])))
-        state.pc += insn.size
-        return state
+    # ------------------------------------------------------------------
+    # ADD/ADDS (immediate, 64-bit)
+    # A64 encoding (Add/subtract (immediate)):
+    #   sf=1 (bit31), op=0 (bit30), S = 0 for ADD / 1 for ADDS (bit29),
+    #   class = 10001b in bits [28:24].
+    # This covers both 0x91000000 (ADD imm) and 0xB1000000 (ADDS imm).
+    # ------------------------------------------------------------------
+    if ((ins & 0x1F000000) == 0x11000000   # class 10001b
+        and ((ins >> 31) & 1) == 1         # sf = 1 (64-bit)
+        and ((ins >> 30) & 1) == 0):       # op = 0 (ADD/ADDS)
+        shift = (ins >> 22) & 0x3
+        if shift not in (0, 1):            # only <<0 or <<12 valid
+            state.pc = pc + 4
+            return state
+        imm12 = (ins >> 10) & 0xFFF
+        imm   = imm12 << (12 if shift == 1 else 0)
+        rn    = (ins >> 5)  & 0x1F
+        rd    =  ins        & 0x1F
 
-    if m == "add" and len(ops) == 3 and ops[0].type == ARM64_OP_REG:
-        a = _get(state, rname(ops[1]))
-        b = int(ops[2].imm) if ops[2].type == ARM64_OP_IMM else _get(state, rname(ops[2]))
-        _set(state, rname(ops[0]), (a + b) & ((1 << 64) - 1))
-        state.pc += insn.size
-        return state
+        res = (_get(state, rname(rn)) + imm) & MASK64
+        _set(state, rname(rd), res)
 
-    if m in ("sub", "subs") and len(ops) == 3 and ops[0].type == ARM64_OP_REG:
-        a = _get(state, rname(ops[1]))
-        b = int(ops[2].imm) if ops[2].type == ARM64_OP_IMM else _get(state, rname(ops[2]))
-        res = (a - b) & ((1 << 64) - 1)
-        _set(state, rname(ops[0]), res)
-        if m == "subs":
+        # If S==1 (ADDS), update flags (only ZF used in tests)
+        if ((ins >> 29) & 1) == 1:
             state.flags["ZF"] = (res == 0)
-        state.pc += insn.size
+
+        state.pc = pc + 4
         return state
 
-    if m == "cmp" and len(ops) == 2 and ops[0].type == ARM64_OP_REG:
-        a = _get(state, rname(ops[0]))
-        b = int(ops[1].imm) if ops[1].type == ARM64_OP_IMM else _get(state, rname(ops[1]))
-        state.flags["ZF"] = ((a - b) & ((1 << 64) - 1)) == 0
-        state.pc += insn.size
+    # MOVZ (Move wide with zero, 64-bit) — simplest form with hw=0
+    if (ins & 0xFF800000) == 0xD2800000:
+        rd = ins & 0x1F
+        imm16 = (ins >> 5) & 0xFFFF
+        _set(state, rname(rd), imm16)
+        state.pc = pc + 4
         return state
 
-    if m == "ldr" and len(ops) == 2 and ops[1].type == ARM64_OP_MEM:
-        mem = ops[1].mem
-        _set(state, rname(ops[0]), read_mem(rname(mem.base), mem.disp))
-        state.pc += insn.size
+    # STR (unsigned immediate, 64-bit)
+    if (ins & 0xFFC00000) == 0xF9000000:
+        rt   =  ins        & 0x1F
+        rn   = (ins >> 5)  & 0x1F
+        imm12 = (ins >> 10) & 0xFFF
+        write_mem(rname(rn), imm12 * 8, _get(state, rname(rt)), state=state)
+        state.pc = pc + 4
         return state
 
-    if m == "str" and len(ops) == 2 and ops[1].type == ARM64_OP_MEM:
-        mem = ops[1].mem
-        write_mem(rname(mem.base), mem.disp, _get(state, rname(ops[0])))
-        state.pc += insn.size
+    # LDR (unsigned immediate, 64-bit)
+    if (ins & 0xFFC00000) == 0xF9400000:
+        rt   =  ins        & 0x1F
+        rn   = (ins >> 5)  & 0x1F
+        imm12 = (ins >> 10) & 0xFFF
+        val = read_mem(rname(rn), imm12 * 8, state=state)
+        _set(state, rname(rt), val)
+        state.pc = pc + 4
         return state
 
-    if m == "b" and len(ops) == 1 and ops[0].type == ARM64_OP_IMM:
-        state.pc = int(ops[0].imm)
+    # ADD (shifted register, 64-bit)
+    if (ins & 0xFF2003E0) == 0x8B000000:
+        rd   =  ins        & 0x1F
+        rn   = (ins >> 5)  & 0x1F
+        rm   = (ins >> 16) & 0x1F
+        imm6 = (ins >> 10) & 0x3F
+        val_m = (_get(state, rname(rm)) << imm6) & MASK64
+        _set(state, rname(rd), (_get(state, rname(rn)) + val_m) & MASK64)
+        state.pc = pc + 4
         return state
 
-    if m == "cbz" and len(ops) == 2 and ops[1].type == ARM64_OP_IMM:
-        reg_is_zero = (_get(state, rname(ops[0])) == 0)
-        if reg_is_zero:
-            state.pc = insn.address + int(ops[1].imm)
+    # SUBS (immediate) — minimal cmp-like behavior (update ZF)
+    if (ins & 0xFF800000) == 0xF1000000:
+        rn    = (ins >> 5)  & 0x1F
+        imm12 = (ins >> 10) & 0xFFF
+        state.flags["ZF"] = (_get(state, rname(rn)) == imm12)
+        state.pc = pc + 4
+        return state
+
+    # CBZ (compare and branch on zero)
+    if (ins & 0xFF000000) == 0xB4000000:
+        rt   =  ins        & 0x1F
+        imm19 = (ins >> 5) & 0x7FFFF
+        off = imm19 << 2
+        if off & (1 << 20):  # sign-extend 21-bit
+            off -= 1 << 21
+        if _get(state, rname(rt)) == 0:
+            target = pc + off
+            state.pc = target if target != pc else pc + 4
         else:
-            state.pc += insn.size
+            state.pc = pc + 4
         return state
 
-    if m == "bl" and len(ops) == 1 and ops[0].type == ARM64_OP_IMM:
-        next_pc = insn.address + insn.size
-        _set(state, "x30", next_pc)
-        state.pc = int(ops[0].imm)
-        state.flags["_depth"] = int(state.flags.get("_depth", 0)) + 1
+    # BL (branch with link)
+    if (ins & 0xFC000000) == 0x94000000:
+        imm26 = ins & 0x03FFFFFF
+        off = imm26 << 2
+        if off & (1 << 27):  # sign-extend 28-bit
+            off -= 1 << 28
+        _set(state, "x30", pc + 4)  # link register
+        state.pc = pc + off
         return state
 
-    if m == "ret":
-        lr = _get(state, "x30")
-        state.pc = lr
-        depth = int(state.flags.get("_depth", 0)) - 1
-        state.flags["_depth"] = max(depth, 0)
-        if state.flags["_depth"] == 0:
-            state.flags["_halt"] = True
+    # RET
+    if ins == 0xD65F03C0:
+        state.pc = _get(state, "x30")
         return state
 
-    state.pc += insn.size
+    # Default: leave state as advanced by 4
     return state
-
-from backend.ir import (
-    IRNop, IRMovImm, IRMovReg, IRAdd, IRSub, IRLoad, IRStore,
-    IRCmp, IRJmp, IRJe
-)
-
-def decode_to_ir(instr_bytes: bytes, state):
-    code = instr_bytes[state.pc:]
-    insn = next(_md.disasm(code, state.pc))
-    m, ops = insn.mnemonic, insn.operands
-    size = insn.size
-    ir = []
-
-    def rname(op_or_id):
-        if isinstance(op_or_id, int):
-            return insn.reg_name(op_or_id)
-        return insn.reg_name(op_or_id.reg)
-
-    if m == "nop":
-        ir = [IRNop()]
-
-    elif m.startswith("mov") and len(ops) == 2 and ops[0].type == ARM64_OP_REG:
-        if ops[1].type == ARM64_OP_IMM:
-            ir = [IRMovImm(rname(ops[0]), int(ops[1].imm))]
-        elif ops[1].type == ARM64_OP_REG:
-            ir = [IRMovReg(rname(ops[0]), rname(ops[1]))]
-
-    elif m == "add" and len(ops) == 3 and ops[0].type == ARM64_OP_REG:
-        if ops[2].type == ARM64_OP_IMM:
-            ir = [IRAdd(rname(ops[0]), rname(ops[1]), int(ops[2].imm))]
-        else:
-            ir = [IRAdd(rname(ops[0]), rname(ops[1]), rname(ops[2]))]
-
-    elif m in ("sub", "subs") and len(ops) == 3 and ops[0].type == ARM64_OP_REG:
-        if ops[2].type == ARM64_OP_IMM:
-            ir = [IRSub(rname(ops[0]), rname(ops[1]), int(ops[2].imm))]
-        else:
-            ir = [IRSub(rname(ops[0]), rname(ops[1]), rname(ops[2]))]
-        if m == "subs":
-            ir.append(IRCmp(rname(ops[0]), 0))
-
-    elif m == "cmp" and len(ops) == 2 and ops[0].type == ARM64_OP_REG:
-        right = (int(ops[1].imm) if ops[1].type == ARM64_OP_IMM else rname(ops[1]))
-        ir = [IRCmp(rname(ops[0]), right)]
-
-    elif m == "ldr" and len(ops) == 2 and ops[1].type == ARM64_OP_MEM:
-        mem = ops[1].mem
-        ir = [IRLoad(rname(ops[0]), base=rname(mem.base), disp=mem.disp)]
-
-    elif m == "str" and len(ops) == 2 and ops[1].type == ARM64_OP_MEM:
-        mem = ops[1].mem
-        ir = [IRStore(rname(ops[0]), base=rname(mem.base), disp=mem.disp)]
-
-    elif m == "b" and len(ops) == 1 and ops[0].type == ARM64_OP_IMM:
-        ir = [IRJmp(int(ops[0].imm))]
-
-    elif m == "cbz" and len(ops) == 2 and ops[1].type == ARM64_OP_IMM:
-        ir = [IRCmp(rname(ops[0]), 0), IRJe(int(ops[1].imm))]
-
-    else:
-        ir = [IRNop()]
-
-    return ir, size

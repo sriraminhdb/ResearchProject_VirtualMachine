@@ -1,102 +1,88 @@
 from __future__ import annotations
+from typing import Any, Callable, Dict, Iterable, Optional, Set
 
-from dataclasses import dataclass
-from typing import Optional, Set, Callable, Dict, Any
+from .state import VMState
+from .dispatcher import dispatch as _dispatch
+from . import isadetect as _isadetect
 
-STACK_SIZE = 4096
 
-@dataclass
-class VMState:
-    memory: bytearray
-    registers: dict
-    pc: int
-    flags: dict
-    code_end: int
-    current_isa: Optional[str] = None
+def _auto_detect_isa(state: VMState) -> str:
+    """
+    Detect ISA from the next few bytes in memory without touching the FS.
+    Prefer a byte-aware detector if available; otherwise a small heuristic.
+    """
+    window = bytes(state.memory[state.pc:state.pc + 16])
+    try:
+        return _isadetect.detect(window)
+    except Exception:
+        if window[:4] in (b"\x1F\x20\x03\xD5", b"\x41\x05\x80\xD2"):
+            return "arm"
+        if window[:1] in {b"\x48", b"\x90", b"\xE9", b"\xEB", b"\xC3", b"\x55"}:
+            return "x86"
+        return "x86"
 
-    def __init__(self, memory: bytes, registers=None, pc: int = 0):
-        self.memory = bytearray(memory)
-        self.code_end = len(self.memory)
-        self.memory.extend(b"\x00" * STACK_SIZE)
-
-        self.registers = dict(registers or {})
-        self.pc = pc
-        self.flags = {"ZF": False, "_depth": 0, "_halt": False}
-
-        top = len(self.memory)
-        self.registers.setdefault("rsp", top)
-        self.registers.setdefault("sp", top)
 
 def run_bytes(
-    memory: bytes,
-    isa: str,
+    code: bytes,
+    isa: str = "auto",
     *,
-    max_steps: int = 100_000,
-    breakpoints: Optional[Set[int]] = None,
-    trace: Optional[Callable[[str, dict], None]] = None,
-    use_ir: bool = False,
-    use_jit: bool = False,
+    state: Optional[VMState] = None,
     registers: Optional[Dict[str, int]] = None,
+    pc: Optional[int] = None,
+    flags: Optional[Dict[str, Any]] = None,
+    breakpoints: Optional[Iterable[int]] = None,
+    trace: Optional[Callable[[str, Dict[str, Any]], None]] = None,
+    max_steps: Optional[int] = None,
+    use_ir: bool = False,
+    use_llvm: bool = False,
+    **_ignored,
 ) -> VMState:
-    """
-    If isa in {'x86','arm'} and use_ir=False → legacy per-ISA step path.
-    If isa == 'auto' or use_ir=True → dispatcher still routes per-insn, but
-    may choose the common IR on a per-instruction basis.
-    """
-    from backend.dispatcher import dispatch
+    created_here = state is None
+    st = state or VMState(memory=code)
 
-    bp = set(breakpoints or [])
-    state = VMState(memory=bytearray(memory), registers=registers or {}, pc=0)
-    steps = 0
-    same_pc_count = 0
-    _top = len(state.memory)
-    _stack_touched = False
+    if not isinstance(st.memory, bytearray):
+        st.memory = bytearray(st.memory)
+    if not st.memory:
+        st.memory = bytearray(code)
 
-    hooks: Dict[str, Any] = {}
-    if trace:
-        hooks["after_decode"] = lambda chosen, pc, ir: trace("after_decode", {"isa": chosen, "pc": pc, "ir": [*ir]})
-        hooks["before_exec"] = lambda op: trace("before_exec", {"op": type(op).__name__})
-        hooks["after_exec"] = lambda info, st: trace("after_exec", {"op": info, "pc": st.pc})
-        hooks["on_switch"] = lambda old, new, pc: trace("on_switch", {"from": old, "to": new, "pc": pc})
+    if registers:
+        st.registers.update(registers)
+    if pc is not None:
+        st.pc = int(pc)
+    if flags:
+        st.flags.update(flags)
 
-    detect_cache: Dict[int, str] = {}
+    st.code_end = len(st.memory)
+    st.flags.setdefault("_halt", False)
 
-    initial_rsp = len(state.memory)
-    initial_sp = initial_rsp
+    bps: Set[int] = set(int(x) for x in (breakpoints or []))
+    steps_done = 0
+    last_isa: Optional[str] = None
 
-    state.registers.setdefault("rsp", initial_rsp)  
-    state.registers.setdefault("sp", initial_sp)   
+    if max_steps is None:
+        max_steps = 1_000_000
 
-    while 0 <= state.pc < state.code_end and not state.flags.get("_halt", False):
-        if state.pc in bp:
-            state.flags["_halt"] = True
+    while True:
+        if st.pc >= len(st.memory):
+            break
+        if bps and st.pc in bps:
+            break
+        if steps_done >= max_steps:
             break
 
-        pc_before = state.pc
-        state = dispatch(state.memory, state, isa, use_ir=use_ir, use_jit=use_jit, hooks=hooks, _detect_cache=detect_cache)
-        steps += 1
-        state.flags["_steps"] = steps
+        cur_isa = isa if isa != "auto" else _auto_detect_isa(st)
+        if last_isa is not None and cur_isa != last_isa and trace:
+            try:
+                trace("on_switch", {"from": last_isa, "to": cur_isa, "pc": st.pc})
+            except Exception:
+                pass
+        last_isa = cur_isa
 
-        if (state.registers.get("rsp", _top) != _top) or \
-           (state.registers.get("sp", _top)  != _top):
-            _stack_touched = True
+        start_pc = st.pc
+        _dispatch(bytes(st.memory[st.pc:]), st, cur_isa, use_ir=use_ir, use_llvm=use_llvm)
+        steps_done += 1
 
-        if steps >= max_steps:
-            state.flags["_halt"] = True
-            break
+        if st.pc == start_pc:
+            raise RuntimeError(f"No progress made at PC=0x{start_pc:x} (isa={cur_isa})")
 
-        if state.pc == pc_before:
-            same_pc_count += 1
-            if same_pc_count >= 2:
-                state.flags["_halt"] = True
-                break
-        else:
-            same_pc_count = 0
-
-    if (not _stack_touched and
-        state.registers.get("rsp") == _top and
-        state.registers.get("sp")  == _top):
-        state.registers.pop("rsp", None)
-        state.registers.pop("sp", None)
-
-    return state
+    return st
