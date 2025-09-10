@@ -19,6 +19,27 @@ CacheKey   = Tuple[str, int]
 CacheEntry = Tuple[Any, Dict[str, int]]
 _cache: Dict[CacheKey, CacheEntry] = {}
 
+_stats = {
+    "compile_ms_total": 0.0,
+    "compiled_blocks": 0,
+    "cache_hits": 0,
+    "cache_misses": 0,
+}
+
+def cache_stats():
+    """Return a snapshot of current JIT stats."""
+    return dict(_stats)
+
+def _note_hit():
+    _stats["cache_hits"] += 1
+
+def _note_miss():
+    _stats["cache_misses"] += 1
+
+def _note_compile(dt_ms: float):
+    _stats["compile_ms_total"] += float(dt_ms)
+    _stats["compiled_blocks"] += 1
+
 def _get_engine():
     global _engine, _tm
     if _engine is not None:
@@ -29,13 +50,28 @@ def _get_engine():
     _engine = llvm.create_mcjit_compiler(backing_mod, _tm)
     return _engine, _tm
 
+
+def _get_regs_dict(state) -> Dict[str, int]:
+    """Support either state.registers or state.regs; create registers if missing."""
+    d = getattr(state, "registers", None)
+    if isinstance(d, dict):
+        return d
+    d = getattr(state, "regs", None)
+    if isinstance(d, dict):
+        return d
+    d = {}
+    setattr(state, "registers", d)
+    return d
+
 def _reg_index_for_ops(ops: List[IROp]) -> Dict[str, int]:
     regs: Dict[str, int] = {}
+
     def use(r: str | None):
         if not r:
             return
         if r not in regs:
             regs[r] = len(regs)
+
     for op in ops:
         if isinstance(op, MOV):
             use(op.dst); use(op.src_reg)
@@ -57,11 +93,13 @@ def _gep_i64(builder: ir.IRBuilder, base_ptr: ir.Value, idx: int):
     return builder.gep(base_ptr, [ir.Constant(ir.IntType(32), idx)])
 
 def can_jit(ops: List[IROp]) -> bool:
+    """Small but meaningful subset."""
     return all(isinstance(op, (NOP, MOV, ADD, SUB, CMP, JE, JMP, CBZ, LOAD, STORE)) for op in ops)
 
 def _build_function(ir_ops: List[IROp], reg_map: Dict[str, int]) -> Tuple[ir.Function, ir.Module]:
     """
-    Emit: void run(i64* regs, i8* mem, i64* pc, i64* zf)
+    Emit function:
+        void run(i64* regs, i8* mem, i64* pc, i64* zf)
     """
     i64 = ir.IntType(64)
     i8  = ir.IntType(8)
@@ -96,30 +134,32 @@ def _build_function(ir_ops: List[IROp], reg_map: Dict[str, int]) -> Tuple[ir.Fun
 
     def store_reg(name: str, val):
         slot = _gep_i64(builder, regs_ptr, reg_map[name])
-        builder.store(val, slot)  
+        builder.store(val, slot)
 
     def load_mem_q(addr64):
-        off_ptr = builder.gep(mem_ptr, [addr64])      
-        qptr = builder.bitcast(off_ptr, p_i64)        
-        return builder.load(qptr)
+        off_ptr = builder.gep(mem_ptr, [addr64])
+        qptr    = builder.bitcast(off_ptr, p_i64)
+        return builder.load(qptr, align=1)
 
     def store_mem_q(addr64, val64):
         off_ptr = builder.gep(mem_ptr, [addr64])
-        qptr = builder.bitcast(off_ptr, p_i64)
-        builder.store(val64, qptr)
+        qptr    = builder.bitcast(off_ptr, p_i64)
+        builder.store(val64, qptr, align=1)
 
     for op in ir_ops:
         if isinstance(op, NOP):
             inc_pc(op.size)
 
         elif isinstance(op, MOV):
-            v = load_reg(op.src_reg) if op.src_reg is not None else ir.Constant(i64, int(op.src_imm or 0) & ((1<<64)-1))
+            v = load_reg(op.src_reg) if op.src_reg is not None \
+                else ir.Constant(i64, int(op.src_imm or 0) & ((1<<64)-1))
             store_reg(op.dst, v)
             inc_pc(op.size)
 
         elif isinstance(op, ADD):
             a = load_reg(op.a)
-            b = load_reg(op.b_reg) if op.b_reg is not None else ir.Constant(i64, int(op.b_imm or 0) & ((1<<64)-1))
+            b = load_reg(op.b_reg) if op.b_reg is not None \
+                else ir.Constant(i64, int(op.b_imm or 0) & ((1<<64)-1))
             res = builder.add(a, b)
             store_reg(op.dst, res)
             if op.set_flags: set_zf_from_cmp(res, ir.Constant(i64, 0))
@@ -127,7 +167,8 @@ def _build_function(ir_ops: List[IROp], reg_map: Dict[str, int]) -> Tuple[ir.Fun
 
         elif isinstance(op, SUB):
             a = load_reg(op.a)
-            b = load_reg(op.b_reg) if op.b_reg is not None else ir.Constant(i64, int(op.b_imm or 0) & ((1<<64)-1))
+            b = load_reg(op.b_reg) if op.b_reg is not None \
+                else ir.Constant(i64, int(op.b_imm or 0) & ((1<<64)-1))
             res = builder.sub(a, b)
             store_reg(op.dst, res)
             if op.set_flags: set_zf_from_cmp(res, ir.Constant(i64, 0))
@@ -135,7 +176,8 @@ def _build_function(ir_ops: List[IROp], reg_map: Dict[str, int]) -> Tuple[ir.Fun
 
         elif isinstance(op, CMP):
             a = load_reg(op.a_reg)
-            b = load_reg(op.b_reg) if op.b_reg is not None else ir.Constant(i64, int(op.b_imm or 0) & ((1<<64)-1))
+            b = load_reg(op.b_reg) if op.b_reg is not None \
+                else ir.Constant(i64, int(op.b_imm or 0) & ((1<<64)-1))
             res = builder.sub(a, b)
             set_zf_from_cmp(res, ir.Constant(i64, 0))
             inc_pc(op.size)
@@ -205,17 +247,29 @@ def _compile(ir_ops: List[IROp], key: CacheKey) -> None:
     eng.finalize_object()
     ptr = eng.get_function_address("run")
     cfunctype = ctypes.CFUNCTYPE(None,
-                                 ctypes.POINTER(ctypes.c_uint64),  
-                                 ctypes.POINTER(ctypes.c_uint8),   
-                                 ctypes.POINTER(ctypes.c_uint64),  
-                                 ctypes.POINTER(ctypes.c_uint64))  
+                                 ctypes.POINTER(ctypes.c_uint64),
+                                 ctypes.POINTER(ctypes.c_uint8),
+                                 ctypes.POINTER(ctypes.c_uint64),
+                                 ctypes.POINTER(ctypes.c_uint64))
     cfunc = cfunctype(ptr)
     _cache[key] = (cfunc, reg_map)
 
 def run_or_compile(state, ir_ops: List[IROp], isa: str):
+    import time
     key: CacheKey = (isa, state.pc)
     if key not in _cache:
+        _note_miss()
+        t0 = time.perf_counter()
         _compile(ir_ops, key)
+        dt_ms = (time.perf_counter() - t0) * 1000.0
+        _note_compile(dt_ms)
+        if hasattr(getattr(state, "metrics", None), "add_jit_compile"):
+            state.metrics.add_jit_compile(dt_ms)
+    else:
+        _note_hit()
+        if hasattr(getattr(state, "metrics", None), "inc_jit_hit"):
+            state.metrics.inc_jit_hit()
+
     cfunc, reg_map = _cache[key]
 
     n = max(reg_map.values(), default=-1) + 1
